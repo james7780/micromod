@@ -1,14 +1,18 @@
+/*
+        Simple command line test player for micromod using SDL.
+*/
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 #include "SDL/SDL.h"
 #include "SDL/SDL_main.h"
 
 #include "micromod.h"
 
-/*
-        Simple command line test player for micromod using SDL.
-*/
+
+using namespace MicroMod;
+CMicroMod modPlayer;
 
 #define SAMPLING_FREQ  48000  /* 48khz. */
 #define REVERB_BUF_LEN 4800   /* 50ms. */
@@ -35,8 +39,8 @@ static void downsample( short *input, short *output, long count ) {
                 out_r = filt_r + ( input[ in_idx++ ] >> 1 );
                 filt_l = input[ in_idx++ ] >> 2;
                 filt_r = input[ in_idx++ ] >> 2;
-                output[ out_idx++ ] = out_l + filt_l;
-                output[ out_idx++ ] = out_r + filt_r;
+                output[ out_idx++ ] = (short)(out_l + filt_l);
+                output[ out_idx++ ] = (short)(out_r + filt_r);
         }
 }
 
@@ -69,7 +73,7 @@ static void audio_callback( void *udata, Uint8 *stream, int len ) {
                 count = samples_remaining;
         }
         memset( mix_buffer, 0, count * NUM_CHANNELS * sizeof( short ) );
-        micromod_get_audio( mix_buffer, count );
+        modPlayer.GetAudio(mix_buffer, count);
         downsample( mix_buffer, ( short * ) stream, count );
         reverb( ( short * ) stream, count / OVERSAMPLE );
         samples_remaining -= count;
@@ -77,7 +81,7 @@ static void audio_callback( void *udata, Uint8 *stream, int len ) {
         if( samples_remaining <= 0 ) SDL_SemPost( semaphore );
 }
 
-static void load_module( char *file_name ) {
+static void load_module(CMicroMod &modPlayer, char *file_name) {
         FILE *file;
         void *module;
         long length, read, error;
@@ -98,7 +102,7 @@ static void load_module( char *file_name ) {
                 fprintf( stderr, "Unable to read module header.\n");
                 exit( EXIT_FAILURE );
         }
-        length = micromod_calculate_mod_file_len( module );
+        length = modPlayer.CalculateModFileLen((signed char *)module);
         if( length < 0 ) {
                 fprintf( stderr, "Module file type not recognised.\n");
                 exit( EXIT_FAILURE );
@@ -125,8 +129,9 @@ static void load_module( char *file_name ) {
                 fprintf( stderr, "Unable to close file.\n");
                 exit( EXIT_FAILURE );
         }
-        
-        error = micromod_initialise( ( signed char * ) module, SAMPLING_FREQ * OVERSAMPLE );
+
+        //error = micromod_initialise();
+				error = modPlayer.Initialise((signed char *)module, SAMPLING_FREQ * OVERSAMPLE);
         if( error != 0 ) {
                 fprintf( stderr, "Unable to initialise replay.\n");
                 exit( EXIT_FAILURE );
@@ -137,9 +142,9 @@ static void print_module_info() {
         int inst;
         char string[ 23 ];
         for( inst = 0; inst < 16; inst++ ) {
-                micromod_get_string( inst, string );
+                modPlayer.GetString( inst, string );
                 printf( "%02i - %-22s ", inst, string );
-                micromod_get_string( inst + 16, string );
+                modPlayer.GetString( inst + 16, string );
                 printf( "%02i - %-22s\n", inst + 16, string );
         }
 }
@@ -159,11 +164,11 @@ int main( int argc, char **argv ) {
         }
 
         /* Read module. */
-        load_module( filename );
+        load_module(modPlayer, filename);
         print_module_info();
         
         /* Calculate song length. */
-        samples_remaining = micromod_calculate_song_duration();
+        samples_remaining = modPlayer.CalculateSongDuration();
         printf( "Song Duration: %i seconds.\n", ( int ) ( samples_remaining / ( SAMPLING_FREQ * OVERSAMPLE ) ) );
         fflush( NULL );
 

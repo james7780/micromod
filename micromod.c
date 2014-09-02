@@ -1,35 +1,16 @@
+// MicroMod C++ version
+// fast protracker replay version 20140514 (c)2014 mumart@gmail.com
+// C++ version by James Higgs james7780@yahoo.com
+//
+#include "stdio.h"
+#include "string.h"
 #include "micromod.h"
 
-/* fast protracker replay version 20140514 (c)2014 mumart@gmail.com */
-
-#define MAX_CHANNELS 16
-#define MAX_INSTRUMENTS 32
+using namespace MicroMod;
 
 #define FP_SHIFT     14
 #define FP_ONE       16384
 #define FP_MASK      16383
-
-struct note {
-        unsigned short key;
-        unsigned char instrument, effect, param;
-};
-
-struct instrument {
-        unsigned char volume, fine_tune;
-        unsigned long loop_start, loop_length;
-        signed char *sample_data;
-};
-
-struct channel {
-        struct note note;
-        unsigned short period, porta_period;
-        unsigned long sample_offset, sample_idx, step;
-        unsigned char volume, panning, fine_tune, ampl;
-        unsigned char id, instrument, assigned, porta_speed, pl_row, fx_count;
-        unsigned char vibrato_type, vibrato_phase, vibrato_speed, vibrato_depth;
-        unsigned char tremolo_type, tremolo_phase, tremolo_speed, tremolo_depth;
-        signed char tremolo_add, vibrato_add, arpeggio_add;
-};
 
 static const unsigned short fine_tuning[] = {
         4096, 4067, 4037, 4008, 3979, 3951, 3922, 3894,
@@ -46,17 +27,7 @@ static const unsigned char sine_table[] = {
         255, 253, 250, 244, 235, 224, 212, 197, 180, 161, 141, 120,  97,  74,  49,  24
 };
 
-static signed char *module_data;
-static unsigned char *pattern_data, *sequence;
-static long song_length, restart, num_patterns, num_channels;
-static struct instrument instruments[ MAX_INSTRUMENTS ];
-
-static long sample_rate, c2_rate, gain, tick_len, tick_offset;
-static long pattern, break_pattern, row, next_row, tick;
-static long speed, pl_count, pl_channel, random_seed;
-
-static struct channel channels[ MAX_CHANNELS ];
-
+// Calculate the number of patterns in a mod
 static long calculate_num_patterns( signed char *module_header ) {
         long num_patterns, order_entry, pattern;
         num_patterns = 0;
@@ -67,6 +38,7 @@ static long calculate_num_patterns( signed char *module_header ) {
         return num_patterns;
 }
 
+// Calculate the number of channels in a mod
 static long calculate_num_channels( signed char *module_header ) {
         long numchan;
         switch( ( module_header[ 1082 ] << 8 ) | module_header[ 1083 ] ) {
@@ -94,11 +66,51 @@ static long unsigned_short_big_endian( signed char *buf, long offset ) {
         return ( ( buf[ offset ] & 0xFF ) << 8 ) | ( buf[ offset + 1 ] & 0xFF );
 }
 
-static void set_tempo( long tempo ) {
+
+/// Constructors
+CMicroMod::CMicroMod()
+: module_data(NULL), pattern_data(NULL), sequence(NULL),
+	song_length(0), restart(0), num_patterns(0), num_channels(0),
+	sample_rate(0), c2_rate(0), gain(0), tick_len(0), tick_offset(0),
+	pattern(0), break_pattern(0), row(0), next_row(0), tick(0),
+	speed(0), pl_count(0), pl_channel(0), random_seed(0)
+{
+	memset(instruments, 0, MAX_INSTRUMENTS * sizeof(instrument));
+	memset(channels, 0, MAX_CHANNELS * sizeof(channel));
+}
+
+CMicroMod::CMicroMod(signed char *data, long sampling_rate)
+: module_data(NULL), pattern_data(NULL), sequence(NULL),
+	song_length(0), restart(0), num_patterns(0), num_channels(0),
+	sample_rate(0), c2_rate(0), gain(0), tick_len(0), tick_offset(0),
+	pattern(0), break_pattern(0), row(0), next_row(0), tick(0),
+	speed(0), pl_count(0), pl_channel(0), random_seed(0)
+{
+	memset(instruments, 0, MAX_INSTRUMENTS * sizeof(instrument));
+	memset(channels, 0, MAX_CHANNELS * sizeof(channel));
+
+	Initialise(data, sampling_rate);
+}
+
+/// Calculate the length in bytes of a module file given the 1084-byte header.
+/// Returns -1 if the data is not recognised as a module.
+/// !STATIC!
+long CMicroMod::CalculateModFileLen( signed char *module_header ) {
+        long length, numchan, inst_idx;
+        numchan = calculate_num_channels( module_header );
+        if( numchan <= 0 ) return -1;
+        length = 1084 + 4 * numchan * 64 * calculate_num_patterns( module_header );
+        for( inst_idx = 1; inst_idx < 32; inst_idx++ )
+                length += unsigned_short_big_endian( module_header, inst_idx * 30 + 12 ) * 2;
+        return length;
+}
+
+/// Set the tempo of the mod
+void CMicroMod::set_tempo( long tempo ) {
         tick_len = ( ( sample_rate << 1 ) + ( sample_rate >> 1 ) ) / tempo;
 }
 
-static void update_frequency( struct channel *chan ) {
+void CMicroMod::update_frequency( struct channel *chan ) {
         long period, volume;
         unsigned long freq;
         period = chan->period + chan->vibrato_add;
@@ -109,10 +121,11 @@ static void update_frequency( struct channel *chan ) {
         volume = chan->volume + chan->tremolo_add;
         if( volume > 64 ) volume = 64;
         if( volume < 0 ) volume = 0;
-        chan->ampl = volume * gain;
+        chan->ampl = (unsigned char)(volume * gain);
 }
 
-static void tone_portamento( struct channel *chan ) {
+/// Apply portamento to a channel
+void CMicroMod::tone_portamento( struct channel *chan ) {
         long source, dest;
         source = chan->period;
         dest = chan->porta_period;
@@ -123,18 +136,18 @@ static void tone_portamento( struct channel *chan ) {
                 source -= chan->porta_speed;
                 if( source < dest ) source = dest;
         }
-        chan->period = source;
+        chan->period = (unsigned short)source;
 }
 
-static void volume_slide( struct channel *chan, long param ) {
-        long volume;
-        volume = chan->volume + ( param >> 4 ) - ( param & 0xF );
+/// Apply volume slide to a channel
+void CMicroMod::volume_slide( struct channel *chan, long param ) {
+        int volume = chan->volume + ( param >> 4 ) - ( param & 0xF );
         if( volume < 0 ) volume = 0;
         if( volume > 64 ) volume = 64;
-        chan->volume = volume;
+        chan->volume = (unsigned char)volume;
 }
 
-static long waveform( long phase, long type ) {
+long CMicroMod::waveform( long phase, long type ) {
         long amplitude = 0;
         switch( type & 0x3 ) {
                 case 0: /* Sine. */
@@ -155,16 +168,20 @@ static long waveform( long phase, long type ) {
         return amplitude;
 }
 
-static void vibrato( struct channel *chan ) {
-        chan->vibrato_add = waveform( chan->vibrato_phase, chan->vibrato_type ) * chan->vibrato_depth >> 7;
+/// Apply vibrato to a channel
+void CMicroMod::vibrato( struct channel *chan ) {
+        chan->vibrato_add = (char)waveform( chan->vibrato_phase, chan->vibrato_type ) * chan->vibrato_depth >> 7;
 }
 
-static void tremolo( struct channel *chan ) {
-        chan->tremolo_add = waveform( chan->tremolo_phase, chan->tremolo_type ) * chan->tremolo_depth >> 6;
+/// Apply tremolo to a channel
+void CMicroMod::tremolo( struct channel *chan ) {
+        chan->tremolo_add = (char)waveform( chan->tremolo_phase, chan->tremolo_type ) * chan->tremolo_depth >> 6;
 }
 
-static void trigger( struct channel *channel ) {
-        long period, ins;
+/// Trigger an instrument on a channel
+void CMicroMod::trigger( struct channel *channel ) {
+        unsigned short period;
+				unsigned char ins;
         ins = channel->note.instrument;
         if( ins > 0 && ins < MAX_INSTRUMENTS ) {
                 channel->assigned = ins;
@@ -192,10 +209,12 @@ static void trigger( struct channel *channel ) {
         }
 }
 
-static void channel_row( struct channel *chan ) {
-        long effect, param, volume, period;
-        effect = chan->note.effect;
-        param = chan->note.param;
+/// Process a channel for the current row
+void CMicroMod::channel_row( struct channel *chan ) {
+        long volume = 0;
+				long period = 0;
+        unsigned char effect = chan->note.effect;
+        unsigned char param = chan->note.param;
         chan->vibrato_add = chan->tremolo_add = chan->arpeggio_add = chan->fx_count = 0;
         if( !( effect == 0x1D && param > 0 ) ) {
                 /* Not note delay. */
@@ -245,18 +264,18 @@ static void channel_row( struct channel *chan ) {
                         break;
                 case 0x11: /* Fine Portamento Up.*/
                         period = chan->period - param;
-                        chan->period = period < 0 ? 0 : period;
+                        chan->period = period < 0 ? 0 : (unsigned short)period;
                         break;
                 case 0x12: /* Fine Portamento Down.*/
                         period = chan->period + param;
-                        chan->period = period > 65535 ? 65535 : period;
+                        chan->period = period > 65535 ? 65535 : (unsigned short)period;
                         break;
                 case 0x14: /* Set Vibrato Waveform.*/
                         if( param < 8 ) chan->vibrato_type = param;
                         break;
                 case 0x16: /* Pattern Loop.*/
                         if( param == 0 ) /* Set loop marker on this channel. */
-                                chan->pl_row = row;
+                                chan->pl_row = (unsigned char)row;
                         if( chan->pl_row < row ) { /* Marker valid. Begin looping. */
                                 if( pl_count < 0 ) { /* Not already looping, begin. */
                                         pl_count = param;
@@ -265,7 +284,7 @@ static void channel_row( struct channel *chan ) {
                                 if( pl_channel == chan->id ) { /* Next Loop.*/
                                         if( pl_count == 0 ) { /* Loop finished. */
                                                 /* Invalidate current marker. */
-                                                chan->pl_row = row + 1;
+                                                chan->pl_row = (unsigned char)(row + 1);
                                         } else { /* Loop and cancel any breaks on this row. */
                                                 next_row = chan->pl_row;
                                                 break_pattern = -1;
@@ -279,11 +298,11 @@ static void channel_row( struct channel *chan ) {
                         break;
                 case 0x1A: /* Fine Volume Up.*/
                         volume = chan->volume + param;
-                        chan->volume = volume > 64 ? 64 : volume;
+                        chan->volume = volume > 64 ? 64 : (unsigned char)volume;
                         break;
                 case 0x1B: /* Fine Volume Down.*/
                         volume = chan->volume - param;
-                        chan->volume = volume < 0 ? 0 : volume;
+                        chan->volume = volume < 0 ? 0 : (unsigned char)volume;
                         break;
                 case 0x1C: /* Note Cut.*/
                         if( param <= 0 ) chan->volume = 0;
@@ -295,19 +314,20 @@ static void channel_row( struct channel *chan ) {
         update_frequency( chan );
 }
 
-static void channel_tick( struct channel *chan ) {
-        long effect, param, period;
-        effect = chan->note.effect;
-        param = chan->note.param;
+/// Process a tick on a channel
+void CMicroMod::channel_tick( struct channel *chan ) {
+        long period = 0;
+        unsigned char effect = chan->note.effect;
+        unsigned char param = chan->note.param;
         chan->fx_count++;
         switch( effect ) {
                 case 0x1: /* Portamento Up.*/
                         period = chan->period - param;
-                        chan->period = period < 0 ? 0 : period;
+                        chan->period = period < 0 ? 0 : (unsigned short)period;
                         break;
                 case 0x2: /* Portamento Down.*/
                         period = chan->period + param;
-                        chan->period = period > 65535 ? 65535 : period;
+                        chan->period = period > 65535 ? 65535 : (unsigned short)period;
                         break;
                 case 0x3: /* Tone Portamento.*/
                         tone_portamento( chan );
@@ -354,9 +374,12 @@ static void channel_tick( struct channel *chan ) {
         if( effect > 0 ) update_frequency( chan );
 }
 
-static long sequence_row() {
+/// Process all channels on the current row
+long CMicroMod::sequence_row() {
         long song_end, chan_idx, pat_offset;
-        long effect, param;
+        //long param;
+				unsigned char effect;
+				unsigned char param;
         struct note *note;
         song_end = 0;
         if( break_pattern >= 0 ) {
@@ -394,7 +417,8 @@ static long sequence_row() {
         return song_end;
 }
 
-static long sequence_tick() {
+/// Process a sequence tick
+long CMicroMod::sequence_tick() {
         long song_end, chan_idx;
         song_end = 0;
         if( --tick <= 0 ) {
@@ -407,7 +431,7 @@ static long sequence_tick() {
         return song_end;
 }
 
-static void resample( struct channel *chan, short *buf, long offset, long count ) {
+void CMicroMod::resample( struct channel *chan, short *buf, long offset, long count ) {
         long sample, ampl, lamp, ramp;
         unsigned long buf_idx, buf_end, sidx, step, inst, llen, lep1, epos;
         signed char *sdat;
@@ -445,34 +469,18 @@ static void resample( struct channel *chan, short *buf, long offset, long count 
                 while( sidx < epos ) {
                         /* Most of the cpu time is spent in here. */
                         sample = sdat[ sidx >> FP_SHIFT ];
-                        buf[ buf_idx++ ] += sample * lamp >> 8;
-                        buf[ buf_idx++ ] += sample * ramp >> 8;
+                        buf[ buf_idx++ ] += (short)(sample * lamp >> 8);
+                        buf[ buf_idx++ ] += (short)(sample * ramp >> 8);
                         sidx += step;
                 }
         }
         chan->sample_idx = sidx;
 }
 
-/*
-        Calculate the length in bytes of a module file given the 1084-byte header.
-        Returns -1 if the data is not recognised as a module.
-*/
-long micromod_calculate_mod_file_len( signed char *module_header ) {
-        long length, numchan, inst_idx;
-        numchan = calculate_num_channels( module_header );
-        if( numchan <= 0 ) return -1;
-        length = 1084 + 4 * numchan * 64 * calculate_num_patterns( module_header );
-        for( inst_idx = 1; inst_idx < 32; inst_idx++ )
-                length += unsigned_short_big_endian( module_header, inst_idx * 30 + 12 ) * 2;
-        return length;
-}
-
-/*
-        Set the player to play the specified module data.
-        Returns -1 if the data is not recognised as a module.
-        Returns -2 if the sampling rate is less than 8000hz.
-*/
-long micromod_initialise( signed char *data, long sampling_rate ) {
+/// Set the player to play the specified module data.
+/// Returns -1 if the data is not recognised as a module.
+/// Returns -2 if the sampling rate is less than 8000hz.
+long CMicroMod::Initialise( signed char *data, long sampling_rate ) {
         struct instrument *inst;
         long sample_data_offset, inst_idx;
         long sample_length, volume, loop_start, loop_length;
@@ -496,7 +504,7 @@ long micromod_initialise( signed char *data, long sampling_rate ) {
                 sample_length = unsigned_short_big_endian( module_data, inst_idx * 30 + 12 ) * 2;
                 inst->fine_tune = module_data[ inst_idx * 30 + 14 ] & 0xF;
                 volume = module_data[ inst_idx * 30 + 15 ] & 0x7F;
-                inst->volume = volume > 64 ? 64 : volume;
+                inst->volume = volume > 64 ? 64 : (unsigned char)volume;
                 loop_start = unsigned_short_big_endian( module_data, inst_idx * 30 + 16 ) * 2;
                 loop_length = unsigned_short_big_endian( module_data, inst_idx * 30 + 18 ) * 2;
                 if( loop_start + loop_length > sample_length )
@@ -512,18 +520,18 @@ long micromod_initialise( signed char *data, long sampling_rate ) {
         }
         c2_rate = ( num_channels > 4 ) ? 8363 : 8287;
         gain = ( num_channels > 4 ) ? 1 : 2;
-        micromod_set_position( 0 );
+        SetPosition( 0 );
         return 0;
 }
 
-/*
-        Obtains song and instrument names from the module.
-        The song name is returned as instrument 0.
-        The name is copied into the location pointed to by string,
-        and is at most 23 characters long, including the trailing null.
-*/
-void micromod_get_string( long instrument, char *string ) {
-        long index, offset, length, character;
+
+/// Obtains song and instrument names from the module.
+/// The song name is returned as instrument 0.
+/// The name is copied into the location pointed to by string,
+/// and is at most 23 characters long, including the trailing null.
+void CMicroMod::GetString( long instrument, char *string ) {
+        long index, offset, length;
+				char character;
         if( num_channels <= 0 ) {
                 string[ 0 ] = 0;
                 return;
@@ -536,38 +544,37 @@ void micromod_get_string( long instrument, char *string ) {
         }
         for( index = 0; index < length; index++ ) {
                 character = module_data[ offset + index ];
-                if( character < 32 || character > 126 ) character = ' ';
+                if( character < 32 || character > 126 )
+                        character = ' ';
                 string[ index ] = character;
         }
         string[ length ] = 0;
 }
 
-/*
-        Returns the total song duration in samples at the current sampling rate.
-*/
-long micromod_calculate_song_duration() {
+/// Returns the total song duration in samples at the current sampling rate.
+long CMicroMod::CalculateSongDuration() {
         long duration, song_end;
         duration = 0;
         if( num_channels > 0 ) {
-                micromod_set_position( 0 );
+                SetPosition( 0 );
                 song_end = 0;
                 while( !song_end ) {
                         duration += tick_len;
                         song_end = sequence_tick();
                 }
-                micromod_set_position( 0 );
+                SetPosition( 0 );
         }
         return duration;
 }
 
-/*
-        Jump directly to a specific pattern in the sequence.
-*/
-void micromod_set_position( long pos ) {
-        long chan_idx;
+/// Jump directly to a specific pattern in the sequence.
+void CMicroMod::SetPosition( long pos ) {
+        unsigned char chan_idx;
         struct channel *chan;
-        if( num_channels <= 0 ) return; 
-        if( pos >= song_length ) pos = 0;
+        if( num_channels <= 0 )
+               return; 
+        if( pos >= song_length )
+               pos = 0;
         break_pattern = pos;
         next_row = 0;
         tick = 1;
@@ -589,12 +596,10 @@ void micromod_set_position( long pos ) {
         tick_offset = 0;
 }
 
-/*
-        Calculate the specified number of samples of audio.
-        If output pointer is zero, the replay will quickly skip count samples.
-        The output buffer should be cleared with zeroes.
-*/
-void micromod_get_audio( short *output_buffer, long count ) {
+/// Calculate the specified number of samples of audio.
+/// If output pointer is zero, the replay will quickly skip count samples.
+/// The output buffer should be cleared with zeroes.
+void CMicroMod::GetAudio( short *output_buffer, long count ) {
         long offset, remain, chan_idx;
         if( num_channels <= 0 ) return;
         offset = 0;
