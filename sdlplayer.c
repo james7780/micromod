@@ -5,8 +5,8 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "SDL/SDL.h"
-#include "SDL/SDL_main.h"
+#include "../SDL-1.2.13/include/SDL.h"
+#include "../SDL-1.2.13/include/SDL_main.h"
 
 #include "micromod.h"
 
@@ -44,7 +44,9 @@ static void downsample( short *input, short *output, long count ) {
         }
 }
 
-/* Simple stereo cross delay with feedback. */
+/* Simple stereo cross delay with feedback.
+	JH _ Quite CPU intensive
+*/
 static void reverb( short *buffer, long count ) {
         long buffer_idx, buffer_end;
         if( reverb_len > 2 ) {
@@ -75,7 +77,7 @@ static void audio_callback( void *udata, Uint8 *stream, int len ) {
         memset( mix_buffer, 0, count * NUM_CHANNELS * sizeof( short ) );
         modPlayer.GetAudio(mix_buffer, count);
         downsample( mix_buffer, ( short * ) stream, count );
-        reverb( ( short * ) stream, count / OVERSAMPLE );
+        //reverb( ( short * ) stream, count / OVERSAMPLE );
         samples_remaining -= count;
         /* Notify the main thread if song has finished. */      
         if( samples_remaining <= 0 ) SDL_SemPost( semaphore );
@@ -131,7 +133,7 @@ static void load_module(CMicroMod &modPlayer, char *file_name) {
         }
 
         //error = micromod_initialise();
-				error = modPlayer.Initialise((signed char *)module, SAMPLING_FREQ * OVERSAMPLE);
+        error = modPlayer.Initialise((signed char *)module, SAMPLING_FREQ * OVERSAMPLE);
         if( error != 0 ) {
                 fprintf( stderr, "Unable to initialise replay.\n");
                 exit( EXIT_FAILURE );
